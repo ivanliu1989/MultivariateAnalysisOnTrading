@@ -77,22 +77,26 @@ positions=rep(numUnits,8)*t(data.frame(hedgeRatio))[1:8]*tail(dat,1)
 dat.all = tail(fx.symbols.dt[, cols], 759)
 inLong = FALSE
 inShort = FALSE
-goLong = FALSE
-goShort = FALSE
-closePos = FALSE
 initAssets = 1000000
 posiRate = 0.03
-initPortf = c(rep(0,21), rep(FALSE, 5), 0, initAssets, initAssets)
+initPortf = c(rep(0,21), rep(FALSE, 5), 0, initAssets, 0, initAssets)
 initPortf = data.frame(t(initPortf))
 johansen.lookback = 126
 
 for(r in (johansen.lookback+1):nrow(dat.all)){
+    
+    goLong = FALSE
+    goShort = FALSE
+    closePos = FALSE
     
     # settings
     hurst.lookback = 63
     dat = dat.all[(r-johansen.lookback):r, cols]
     dat.log = log(dat)
     nfx = 5
+    threshold = 1.5
+    adf.threshold = 0.3
+    stoploss = -0.1
     
     # stats tests
     jc.res=JohansenCointegrationTest(dat.log, type = "eigen", ecdet = 'const', K = 2)
@@ -133,15 +137,15 @@ for(r in (johansen.lookback+1):nrow(dat.all)){
     # units * prices * hedgeRatio
     
     # stats arbitragy triggers
-    if(zScore >= 1){
+    if(zScore >= threshold & adf.signal < adf.threshold){
         goLong = FALSE
         goShort = TRUE # buy
         closePos = FALSE
-    }else if(zScore <= -1){
+    }else if(zScore <= -threshold & adf.signal < adf.threshold){
         goLong = TRUE # sell
         goShort = FALSE
         closePos = FALSE
-    }else if(abs(zScore) < 0.1){
+    }else if(abs(zScore) < 0.1 | adf.signal < adf.threshold | unrealizedPnL <= stoploss){
         goLong = FALSE
         goShort = FALSE
         closePos = TRUE # sell OR buy
@@ -152,7 +156,7 @@ for(r in (johansen.lookback+1):nrow(dat.all)){
         lstRcd = initPortf
         lstPos = lstRcd[12:16]
     }else{
-        lstRcd = Order.Book[r-johansen.lookback-1,]
+        lstRcd = Order.Book[r-johansen.lookback,]
         lstPos = lstRcd[12:16]
     }
     
@@ -167,29 +171,28 @@ for(r in (johansen.lookback+1):nrow(dat.all)){
         inLong = FALSE
         inShort = TRUE
     }else if(closePos & (inLong | inShort)){
-        pos.fnl = -lstPos
+        pos.fnl = lstPos-lstPos
         mkt.fnl = pos.fnl * data.frame(prices)
         inLong = FALSE
         inShort = FALSE
     }else{
         pos.fnl = lstPos
-        mkt.fnl = 0 * data.frame(prices)
+        mkt.fnl = pos.fnl * data.frame(prices)
     }
     names(mkt.fnl) = paste0('MKT.', cols)
     sumMktValue = sum(mkt.fnl)
     actualValue = lstRcd[28] - sumMktValue
-    unrealizedPnL = sumMktValue + actualValue
     
-    # 11:15
-    # 16:20
+    unrealizedPnL = sum((data.frame(diff(tail(dat,2))[2,]) * lstPos)) / initAssets
+    PnL = sumMktValue + actualValue + unrealizedPnL
     
     orderBook = data.frame(tail(dat,1), adf.signal, jc.signal, hurst.signal, half.life, zScore, ols.r2, 
                            pos.fnl, mkt.fnl, inLong, inShort, goLong, goShort, closePos, 
-                           sumMktValue, actualValue, unrealizedPnL)
+                           sumMktValue, actualValue, unrealizedPnL, PnL)
     names(orderBook) = c(paste0('P.', names(dat)), 'ADF', 'Johansen', 'Hurst', 'H.L', 'ZScore', 'ols.r2', 
                          paste0('Pos.', names(dat)), paste0('Mkt.', names(dat)),
                          'inLong', 'inShort', 'goLong', 'goShort', 'closePos', 
-                         'sumMktValue', 'actualValue', 'unrealizedPnL')
+                         'sumMktValue', 'actualValue', 'unrealizedPnL', 'PnL')
     if(r == (johansen.lookback+1)){
         names(initPortf) = names(orderBook)
         Order.Book = rbind(initPortf, orderBook)
@@ -198,12 +201,10 @@ for(r in (johansen.lookback+1):nrow(dat.all)){
     }
 }
 
-pnl = Order.Book[-1,14:21]
-pnl = data.frame(rowSums(Order.Book[,14:21]))
-names(pnl) = 'positions'
-pnl = na.omit(pnl)
-pnl$pnl = 
-pnl$cumPnL = cumsum(diff(pnl$positions))
-pnl = pnl[-1,]
-pnl = as.xts(cumsum(diff(pnl$positions)))
-chart_Series(pnl[,2])
+Order.Book = as.xts(Order.Book[-1,], order.by = as.Date(rownames(Order.Book[-1,])))
+ret = Order.Book$unrealizedPnL
+hist(ret, 100)
+sum(ret)
+charts.PerformanceSummary(ret)
+chart_Series(cumsum(ret))
+(mean(ret[!ret==0]) - 0.05)/sd(ret[!ret==0])
