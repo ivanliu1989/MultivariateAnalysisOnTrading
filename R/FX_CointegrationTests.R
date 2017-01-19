@@ -44,8 +44,8 @@ load('data/all_usd_related_forex.RData')
 cols = c('AUDUSD', 'USDRUB', 'GBPUSD', 'USDCAD', 'USDHUF') # 'NZDUSD', 'USDNOK',  , 'KRWUSD' , 'USDMXN' , 'USDSEK'
 
 # Eigenvector and Johansen
-johansen.lookback = 63
-hurst.lookback = 63
+johansen.lookback = 252
+hurst.lookback = 20
 t = nrow(fx.symbols.dt)
 dat = fx.symbols.dt[(t-johansen.lookback):t, cols]
 jc.res=JohansenCointegrationTest(log(dat), type = "eigen", ecdet = 'const', K = 2)
@@ -54,8 +54,10 @@ summary(ols.fit)
 
 # Spreads
 hedgeRatio = jc.res$jc.test@V[1:5, 1]
-# hedgeRatio = c(1, ols.fit$coefficients[-1])
+hedgeRatio = c(1, -ols.fit$coefficients[-1])
+
 spreads = dat %*% t(data.frame(hedgeRatio))[1:5]
+spreads = rowSums(dat)
 spreads = as.xts(spreads, order.by = index(dat))
 chart_Series(spreads)
 
@@ -74,14 +76,14 @@ positions=rep(numUnits,8)*t(data.frame(hedgeRatio))[1:8]*tail(dat,1)
 
 
 # Backtesting -------------------------------------------------------------
-dat.all = tail(fx.symbols.dt[, cols], 759)
+dat.all = tail(fx.symbols.dt[, cols], 504)
 inLong = FALSE
 inShort = FALSE
 initAssets = 1000000
-posiRate = 0.03
+posiRate = 0.05
 initPortf = c(rep(0,21), rep(FALSE, 5), 0, initAssets, 0, initAssets)
 initPortf = data.frame(t(initPortf))
-johansen.lookback = 126
+johansen.lookback = 63
 
 for(r in (johansen.lookback+1):nrow(dat.all)){
     
@@ -90,26 +92,27 @@ for(r in (johansen.lookback+1):nrow(dat.all)){
     closePos = FALSE
     
     # settings
-    hurst.lookback = 63
+    hurst.lookback = 20
     dat = dat.all[(r-johansen.lookback):r, cols]
     dat.log = log(dat)
     nfx = 5
-    threshold = 1.5
+    threshold = 1.2
     adf.threshold = 0.3
-    stoploss = -0.1
+    jc.threshold = 0.2
+    hurst.threshold = 0.499
+    stoploss = -0.05
     
     # stats tests
     jc.res=JohansenCointegrationTest(dat.log, type = "eigen", ecdet = 'const', K = 2)
     ols.fit = lm(AUDUSD~. , dat.log)
     ols.r2 = summary(ols.fit)$r.squared
-    print(ols.r2)
+    # print(ols.r2)
     
     # Spreads
-    hedgeRatio = jc.res$jc.test@V[1:nfx, 1]
-    # hedgeRatio = c(1, ols.fit$coefficients[-1])
+    hedgeRatio = c(1, -ols.fit$coefficients[-1])
     spreads = dat %*% t(data.frame(hedgeRatio))[1:nfx]
     spreads = as.xts(spreads, order.by = index(dat))
-    chart_Series(spreads)
+    # chart_Series(spreads)
     spreads = na.omit(spreads)
     
     # stats tests 2
@@ -119,8 +122,8 @@ for(r in (johansen.lookback+1):nrow(dat.all)){
     
     # signals
     adf.signal=adf.res$p.value
-    jc.signal=as.numeric(((jc.res$p.value[1]-jc.res$r.1)/((jc.res$p.value[3]-jc.res$p.value[1])/10)+10)/100)
     hurst.signal=hurst.res
+    jc.signal=as.numeric(((jc.res$p.value[1]-jc.res$r.1)/((jc.res$p.value[3]-jc.res$p.value[1])/10)+10)/100)
     
     # positioning
     zScore=tail(zscores(spreads),1)
@@ -137,7 +140,7 @@ for(r in (johansen.lookback+1):nrow(dat.all)){
     # units * prices * hedgeRatio
     
     # stats arbitragy triggers
-    if(zScore >= threshold & adf.signal < adf.threshold){
+    if(zScore >= threshold & adf.signal <= adf.threshold & jc.signal <= jc.threshold & hurst.signal <= hurst.threshold ){
         goLong = FALSE
         goShort = TRUE # buy
         closePos = FALSE
@@ -183,8 +186,12 @@ for(r in (johansen.lookback+1):nrow(dat.all)){
     sumMktValue = sum(mkt.fnl)
     actualValue = lstRcd[28] - sumMktValue
     
-    unrealizedPnL = sum((data.frame(diff(tail(dat,2))[2,]) * lstPos)) / initAssets
-    PnL = sumMktValue + actualValue + unrealizedPnL
+    unrealizedPnL = sum((data.frame(diff(tail(dat,2))[2,]) * lstPos)) / sum((data.frame(tail(dat,2)[1,]) * abs(lstPos)))
+    unrealizedPnL = round(ifelse(is.nan(unrealizedPnL), 0, unrealizedPnL), 5)
+    
+    
+    # PnL = sumMktValue + actualValue + unrealizedPnL
+    PnL = round(sum((data.frame(diff(tail(dat,2))[2,]))) / sum((data.frame(tail(dat,2)[1,]))),5)
     
     orderBook = data.frame(tail(dat,1), adf.signal, jc.signal, hurst.signal, half.life, zScore, ols.r2, 
                            pos.fnl, mkt.fnl, inLong, inShort, goLong, goShort, closePos, 
@@ -199,12 +206,18 @@ for(r in (johansen.lookback+1):nrow(dat.all)){
     }else{
         Order.Book = rbind(Order.Book,orderBook)
     }
+    
+    cat(paste0('\n', unrealizedPnL, ' | ', PnL))
 }
 
 Order.Book = as.xts(Order.Book[-1,], order.by = as.Date(rownames(Order.Book[-1,])))
-ret = Order.Book$unrealizedPnL
-hist(ret, 100)
-sum(ret)
-charts.PerformanceSummary(ret)
-chart_Series(cumsum(ret))
-(mean(ret[!ret==0]) - 0.05)/sd(ret[!ret==0])
+ret = Order.Book[,c('unrealizedPnL', 'PnL', 'ADF')]
+# hist(ret[,1], 300); 
+# hist(ret[,2], 100)
+quantile(ret[,1],probs = seq(0, 1, 0.25))
+sum(ret[,1]); sum(ret[,2])
+charts.PerformanceSummary(ret[, c(1,2)])
+# chart_Series(ret[,3])
+# sharpe
+(mean(ret[ret[,1]!=0, 1])-mean(ret[ret[,1]!=0,2]))/sd(ret[ret[,1]!=0,1])
+
